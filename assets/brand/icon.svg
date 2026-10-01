@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="rp-ink" x1="300" y1="200" x2="780" y2="820" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF3D6E"/>
+      <stop offset="0.48" stop-color="#FF2447"/>
+      <stop offset="1" stop-color="#FF8A1F"/>
+    </linearGradient>
+    <linearGradient id="rp-leg" x1="560" y1="530" x2="720" y2="812" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C4133A"/>
+      <stop offset="0.55" stop-color="#FF4A2E"/>
+      <stop offset="1" stop-color="#FFA41F"/>
+    </linearGradient>
+    <linearGradient id="rp-fold" x1="560" y1="588" x2="600" y2="718" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#000" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="rp-sheen" x1="292" y1="212" x2="560" y2="520" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FF2447" stop-opacity="0.34"/>
+      <stop offset="0.45" stop-color="#FF2447" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#FF2447" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FF8A1F" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#FF8A1F" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="vignette" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#15151D"/>
+      <stop offset="1" stop-color="#050507"/>
+    </linearGradient>
+</defs>
+  
+  <rect width="1024" height="1024" fill="url(#vignette)"/>
+  <circle cx="500" cy="470" r="470" fill="url(#glow)"/>
+  <circle cx="690" cy="760" r="330" fill="url(#glow2)"/>
+<g transform="translate(512 512) scale(0.9) translate(-532 -512)">
+      <path d="M524.09 530.00 L692.09 530.00 L761.18 773.82 A30.00 30.00 0 0 1 732.32 812.00 L622.14 812.00 A24.00 24.00 0 0 1 599.05 794.54 L524.09 530.00 Z" fill="url(#rp-leg)"/>
+      <path d="M524.09 530.00 L692.09 530.00 L761.18 773.82 A30.00 30.00 0 0 1 732.32 812.00 L622.14 812.00 A24.00 24.00 0 0 1 599.05 794.54 L524.09 530.00 Z" fill="url(#rp-fold)"/>
+      <path d="M292.00 246.00 A34.00 34.00 0 0 1 326.00 212.00 L566.00 212.00 L582.82 212.73 L599.51 214.93 L615.95 218.58 L632.01 223.64 L647.57 230.08 L662.50 237.86 L676.70 246.90 L690.06 257.15 L702.47 268.53 L713.85 280.94 L724.10 294.30 L733.14 308.50 L740.92 323.43 L747.36 338.99 L752.42 355.05 L756.07 371.49 L758.27 388.18 L759.00 405.00 L758.27 421.82 L756.07 438.51 L752.42 454.95 L747.36 471.01 L740.92 486.57 L733.14 501.50 L724.10 515.70 L713.85 529.06 L702.47 541.47 L690.06 552.85 L676.70 563.10 L662.50 572.14 L647.57 579.92 L632.01 586.36 L615.95 591.42 L599.51 595.07 L582.82 597.27 L566.00 598.00 L452.00 598.00 L452.00 786.00 A26.00 26.00 0 0 1 426.00 812.00 L326.00 812.00 A34.00 34.00 0 0 1 292.00 778.00 L292.00 246.00 Z M458.00 344.80 A22.00 22.00 0 0 1 490.87 325.68 L596.81 385.87 A22.00 22.00 0 0 1 596.81 424.13 L490.87 484.32 A22.00 22.00 0 0 1 458.00 465.20 L458.00 344.80 Z" fill="url(#rp-ink)" fill-rule="evenodd"/>
+      <path d="M292.00 246.00 A34.00 34.00 0 0 1 326.00 212.00 L566.00 212.00 L582.82 212.73 L599.51 214.93 L615.95 218.58 L632.01 223.64 L647.57 230.08 L662.50 237.86 L676.70 246.90 L690.06 257.15 L702.47 268.53 L713.85 280.94 L724.10 294.30 L733.14 308.50 L740.92 323.43 L747.36 338.99 L752.42 355.05 L756.07 371.49 L758.27 388.18 L759.00 405.00 L758.27 421.82 L756.07 438.51 L752.42 454.95 L747.36 471.01 L740.92 486.57 L733.14 501.50 L724.10 515.70 L713.85 529.06 L702.47 541.47 L690.06 552.85 L676.70 563.10 L662.50 572.14 L647.57 579.92 L632.01 586.36 L615.95 591.42 L599.51 595.07 L582.82 597.27 L566.00 598.00 L452.00 598.00 L452.00 786.00 A26.00 26.00 0 0 1 426.00 812.00 L326.00 812.00 A34.00 34.00 0 0 1 292.00 778.00 L292.00 246.00 Z M458.00 344.80 A22.00 22.00 0 0 1 490.87 325.68 L596.81 385.87 A22.00 22.00 0 0 1 596.81 424.13 L490.87 484.32 A22.00 22.00 0 0 1 458.00 465.20 L458.00 344.80 Z" fill="url(#rp-sheen)" fill-rule="evenodd"/></g>
+</svg>

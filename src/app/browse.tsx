@@ -10,18 +10,34 @@ import { KIND_LABELS, matches, resolveKeys, variantFor } from '@/lib/catalog';
 import { useLayout } from '@/lib/layout';
 import type { Channel, ChannelKind } from '@/lib/m3u';
 import { usePlaylist } from '@/lib/playlist-store';
-import { getSeries, resumeBadge, resumePoints, resumeShows, showSummary, type Show } from '@/lib/series';
+import { progressFraction } from '@/lib/progress';
+import { useWatchProgress } from '@/lib/progress-store';
+import {
+  getSeries,
+  resumeBadge,
+  resumePoints,
+  resumeShows,
+  showProgress,
+  showSummary,
+  type Show,
+} from '@/lib/series';
 import { colors, fonts } from '@/lib/theme';
 
 /** Live TV and movies list their channels; series list one folder per show. */
 type Listing =
   | { title: string; channels: Channel[] }
-  | { title: string; shows: Show[]; badge(show: Show): string | undefined };
+  | {
+      title: string;
+      shows: Show[];
+      badge(show: Show): string | undefined;
+      progress(show: Show): number | undefined;
+    };
 
 /** "See all" for a rail: one group, the user's list, or recently watched. */
 export default function BrowseScreen() {
   const params = useLocalSearchParams<{ kind?: string; group?: string; list?: string }>();
   const { channels, favorites, recents, toggleFavorite, setQueue } = usePlaylist();
+  const watched = useWatchProgress();
   const { s, wide, gutter } = useLayout();
   const [query, setQuery] = useState('');
   const search = useDeferredValue(query.trim().toLowerCase());
@@ -33,17 +49,20 @@ export default function BrowseScreen() {
     const group = params.group ?? '';
     if (kind === 'series') {
       const catalog = getSeries(channels);
+      const resume = resumePoints(catalog, recents, watched);
+      const progress = showProgress(resume, watched);
       if (params.list === 'favorites') {
-        return { title: 'My List', shows: catalog.shows.filter((show) => favorites.has(show.key)), badge: showSummary };
+        const shows = catalog.shows.filter((show) => favorites.has(show.key));
+        return { title: 'My List', shows, badge: showSummary, progress };
       }
       if (params.list === 'recent') {
-        const resume = resumePoints(catalog, recents);
-        return { title: 'Continue Watching', shows: resumeShows(catalog, resume), badge: resumeBadge(resume) };
+        return { title: 'Continue Watching', shows: resumeShows(catalog, resume), badge: resumeBadge(resume), progress };
       }
       return {
         title: group || KIND_LABELS[kind],
         shows: group ? (catalog.groups.find((g) => g.name === group)?.shows ?? []) : catalog.shows,
         badge: showSummary,
+        progress,
       };
     }
 
@@ -54,11 +73,12 @@ export default function BrowseScreen() {
     if (params.list === 'recent') {
       return {
         title: kind === 'live' ? 'Recently Watched' : 'Continue Watching',
-        channels: resolveKeys(ofKind, recents),
+        // A movie watched to the end has nothing left to continue.
+        channels: resolveKeys(ofKind, recents).filter((c) => kind === 'live' || !watched.get(c.key)?.finished),
       };
     }
     return { title: group || KIND_LABELS[kind], channels: ofKind.filter((c) => !group || c.group === group) };
-  }, [channels, kind, params.list, params.group, favorites, recents]);
+  }, [channels, kind, params.list, params.group, favorites, recents, watched]);
 
   const { title } = listing;
   const count = 'shows' in listing ? listing.shows.length : listing.channels.length;
@@ -104,6 +124,11 @@ export default function BrowseScreen() {
     </View>
   );
 
+  const channelProgress = useCallback(
+    (c: Channel) => (c.kind === 'live' ? undefined : progressFraction(watched.get(c.key))),
+    [watched],
+  );
+
   const shared = { variant, favorites, onToggleFavorite: toggleFavorite, empty };
 
   return (
@@ -115,9 +140,15 @@ export default function BrowseScreen() {
       />
       {!wide && count > 8 && filter}
       {'shows' in visible ? (
-        <ChannelGrid {...shared} items={visible.shows} badge={visible.badge} onPress={openShow} />
+        <ChannelGrid
+          {...shared}
+          items={visible.shows}
+          badge={visible.badge}
+          progress={visible.progress}
+          onPress={openShow}
+        />
       ) : (
-        <ChannelGrid {...shared} items={visible.channels} onPress={play} />
+        <ChannelGrid {...shared} items={visible.channels} progress={channelProgress} onPress={play} />
       )}
     </View>
   );

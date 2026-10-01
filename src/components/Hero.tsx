@@ -6,11 +6,14 @@ import { Animated, StyleSheet, Text, View } from 'react-native';
 import type { CardItem } from '@/lib/catalog';
 import type { ChannelKind } from '@/lib/m3u';
 import { useLayout, type Layout } from '@/lib/layout';
+import { progressFraction, timeLeftLabel, type WatchProgress } from '@/lib/progress';
+import { useWatchProgress } from '@/lib/progress-store';
 import { colors, fonts, gradients, tileGradient } from '@/lib/theme';
 
 import { Button, type IconName } from './Button';
 import { initials } from './ChannelLogo';
 import { Focusable, NATIVE_DRIVER } from './Focusable';
+import { ProgressBar } from './ProgressBar';
 
 const ROTATE_MS = 9000;
 const FADE_MS = 800;
@@ -42,6 +45,7 @@ interface Props<T extends HeroItem> {
 /** Full-bleed featured billboard that cross-fades between a few highlighted titles. */
 export function Hero<T extends HeroItem>({ items, topInset, favorites, onPlay, onToggleFavorite }: Props<T>) {
   const layout = useLayout();
+  const watched = useWatchProgress();
   // Sized for the tallest artwork among the slides, so the page doesn't jump as they rotate.
   const height = heroHeight(layout, topInset, items.some((c) => c.kind !== 'live'));
   const [index, setIndex] = useState(0);
@@ -86,6 +90,8 @@ export function Hero<T extends HeroItem>({ items, topInset, favorites, onPlay, o
       height={height}
       topInset={topInset}
       preferFocus={preferFocus}
+      // Movies started earlier offer to resume; series open their episode list either way.
+      progress={c.kind === 'movie' ? watched.get(c.key) : undefined}
       favorite={favorites.has(c.key)}
       onPlay={() => onPlay(c)}
       onToggleFavorite={() => onToggleFavorite(c.key)}
@@ -176,6 +182,7 @@ function Slide({
   height,
   topInset,
   preferFocus,
+  progress,
   favorite,
   onPlay,
   onToggleFavorite,
@@ -186,16 +193,20 @@ function Slide({
   topInset: number;
   /** Puts the remote's initial focus on the primary button. */
   preferFocus: boolean;
+  progress?: WatchProgress;
   favorite: boolean;
   onPlay(): void;
   onToggleFavorite(): void;
 }) {
   const { wide, gutter, width, s } = layout;
-  const [failed, setFailed] = useState(false);
+  // Remembered per image: the same slide component draws one title after another.
+  const [failedLogo, setFailedLogo] = useState<string>();
   const [from, to] = tileGradient(channel.name);
   const poster = channel.kind !== 'live';
-  const logo = channel.logo && !failed ? channel.logo : undefined;
+  const logo = channel.logo && channel.logo !== failedLogo ? channel.logo : undefined;
   const art = artFrame(layout, height, topInset, poster);
+  const watchedShare = progressFraction(progress);
+  const primary = watchedShare !== undefined ? { label: 'Resume', icon: 'play' as const } : PRIMARY[channel.kind];
 
   const titleSize = s(wide ? 46 : PHONE_TITLE);
 
@@ -215,7 +226,7 @@ function Slide({
           contentFit={poster ? 'cover' : 'contain'}
           cachePolicy="memory-disk"
           transition={250}
-          onError={() => setFailed(true)}
+          onError={() => setFailedLogo(channel.logo)}
         />
       ) : (
         <Text style={[styles.artInitials, { fontSize: Math.round(art.height * 0.3) }]}>{initials(channel.name)}</Text>
@@ -243,9 +254,19 @@ function Slide({
           {channel.kind === 'live' && <View style={[styles.liveDot, { width: s(6), height: s(6), borderRadius: s(3) }]} />}
           <Text style={[styles.badgeText, { fontSize: s(11) }]}>{KIND_BADGE[channel.kind]}</Text>
         </View>
-        <Text style={[styles.group, { fontSize: s(14) }]} numberOfLines={1}>
-          {channel.group}
-        </Text>
+        {progress && watchedShare !== undefined ? (
+          // Where the viewer is takes the place of the category, so the layout keeps its height.
+          <>
+            <ProgressBar value={watchedShare} height={s(4)} style={{ width: s(wide ? 96 : 64) }} />
+            <Text style={[styles.group, { fontSize: s(14) }]} numberOfLines={1}>
+              {timeLeftLabel(progress)}
+            </Text>
+          </>
+        ) : (
+          <Text style={[styles.group, { fontSize: s(14) }]} numberOfLines={1}>
+            {channel.group}
+          </Text>
+        )}
       </View>
       <Text
         style={[
@@ -259,8 +280,8 @@ function Slide({
       </Text>
       <View style={[styles.actions, { gap: s(12), marginTop: s(wide ? 22 : 16) }]}>
         <Button
-          label={PRIMARY[channel.kind].label}
-          icon={PRIMARY[channel.kind].icon}
+          label={primary.label}
+          icon={primary.icon}
           variant="light"
           size="lg"
           onPress={onPlay}

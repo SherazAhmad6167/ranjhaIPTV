@@ -1,20 +1,34 @@
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { isPictureInPictureSupported } from 'expo-video';
+import { useMemo, useState, type ReactNode } from 'react';
+import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, type IconName } from '@/components/Button';
+import { Focusable } from '@/components/Focusable';
 import { LogoMark } from '@/components/Logo';
 import { ScreenHeader } from '@/components/ScreenHeader';
 import { KIND_ICONS, KIND_LABELS, KINDS } from '@/lib/catalog';
 import { useLayout } from '@/lib/layout';
 import { usePlaylist } from '@/lib/playlist-store';
+import { preferences, usePreferences } from '@/lib/preferences';
 import { colors, fonts, gradients } from '@/lib/theme';
+
+// Phones and tablets only; TVs and most browsers have no floating window to offer.
+const PIP_SUPPORTED = (() => {
+  if (Platform.isTV || Platform.OS === 'web') return false;
+  try {
+    return isPictureInPictureSupported();
+  } catch {
+    return false;
+  }
+})();
 
 export default function AccountScreen() {
   const { source, channels, loadedAt, loading, refresh, disconnect } = usePlaylist();
+  const { autoPictureInPicture } = usePreferences();
   const { s, wide } = useLayout();
   const insets = useSafeAreaInsets();
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
@@ -86,6 +100,19 @@ export default function AccountScreen() {
           </View>
         )}
 
+        {PIP_SUPPORTED && (
+          <>
+            <Text style={[styles.section, { fontSize: s(12), marginTop: s(28), marginBottom: s(10) }]}>PLAYBACK</Text>
+            <ToggleRow
+              icon={<MaterialIcons name="picture-in-picture-alt" size={s(22)} color={colors.accent} />}
+              title="Picture-in-picture"
+              description="Keep watching in a small window when you leave the app"
+              value={autoPictureInPicture}
+              onChange={(value) => preferences.set({ autoPictureInPicture: value })}
+            />
+          </>
+        )}
+
         <View style={[styles.actions, { gap: s(12), marginTop: s(24) }]}>
           <Button label="Refresh Channels" icon="refresh" variant="glass" size="lg" busy={loading} onPress={onRefresh} />
           <Button label="Sign Out" icon="log-out-outline" variant="danger" size="lg" onPress={() => disconnect()} />
@@ -110,6 +137,56 @@ function Stat({ icon, label, value }: { icon: IconName; label: string; value: nu
       <Text style={[styles.statValue, { fontSize: s(26) }]}>{value.toLocaleString()}</Text>
       <Text style={[styles.statLabel, { fontSize: s(13) }]}>{label}</Text>
     </View>
+  );
+}
+
+function ToggleRow({
+  icon,
+  title,
+  description,
+  value,
+  onChange,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  value: boolean;
+  onChange(value: boolean): void;
+}) {
+  const { s } = useLayout();
+  const trackWidth = s(46);
+  const knob = s(22);
+  return (
+    <Focusable
+      onPress={() => onChange(!value)}
+      accessibilityRole="switch"
+      accessibilityLabel={title}
+      accessibilityHint={description}
+      accessibilityState={{ checked: value }}
+      style={[styles.toggleRow, { borderRadius: s(16), padding: s(16), gap: s(14) }]}
+      focusStyle={styles.toggleRowFocused}
+    >
+      {icon}
+      <View style={styles.profileText}>
+        <Text style={[styles.toggleTitle, { fontSize: s(16) }]}>{title}</Text>
+        <Text style={[styles.toggleText, { fontSize: s(13) }]}>{description}</Text>
+      </View>
+      <View
+        style={[
+          styles.track,
+          { width: trackWidth, height: knob + s(6), borderRadius: (knob + s(6)) / 2, padding: s(3) },
+          value && styles.trackOn,
+        ]}
+      >
+        <View
+          style={[
+            styles.knob,
+            { width: knob, height: knob, borderRadius: knob / 2 },
+            value && { transform: [{ translateX: trackWidth - knob - s(6) }] },
+          ]}
+        />
+      </View>
+    </Focusable>
   );
 }
 
@@ -153,6 +230,20 @@ const styles = StyleSheet.create({
   messageError: { backgroundColor: 'rgba(255,92,99,0.12)', borderColor: 'rgba(255,92,99,0.3)' },
   messageText: { flex: 1, color: colors.text, fontFamily: fonts.medium },
   actions: { flexDirection: 'row', flexWrap: 'wrap' },
+  section: { color: colors.textMuted, fontFamily: fonts.bold, letterSpacing: 1.4 },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  toggleRowFocused: { borderColor: colors.focus, backgroundColor: colors.surfaceHigh },
+  toggleTitle: { color: colors.text, fontFamily: fonts.semibold },
+  toggleText: { color: colors.textMuted, fontFamily: fonts.regular, marginTop: 2 },
+  track: { backgroundColor: 'rgba(255,255,255,0.18)', justifyContent: 'center' },
+  trackOn: { backgroundColor: colors.accent },
+  knob: { backgroundColor: '#fff' },
   footer: { alignItems: 'center' },
   footerText: { color: colors.textDim, fontFamily: fonts.medium },
 });

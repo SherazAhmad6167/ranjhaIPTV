@@ -1,4 +1,5 @@
 import type { Channel } from './m3u';
+import { progressFraction, type ProgressMap } from './progress';
 
 /**
  * IPTV playlists list series one episode per entry ("Show S01E02"). This
@@ -194,22 +195,61 @@ function buildSeries(channels: readonly Channel[]): SeriesCatalog {
   return { groups, shows, byKey: new Map(shows.map((s) => [s.key, s])), episodes };
 }
 
+/** The episode of a show watched last; `recents` holds channel keys, newest first. */
+export function lastWatched(catalog: SeriesCatalog, show: Show, recents: readonly string[]): Episode | undefined {
+  for (const key of recents) {
+    const episode = catalog.episodes.get(key);
+    if (episode?.showKey === show.key) return episode;
+  }
+  return undefined;
+}
+
+/** Where to pick a show back up: the episode watched last, or the next one once that was watched to the end. */
+export function continueFrom(catalog: SeriesCatalog, episode: Episode, progress: ProgressMap): Episode {
+  if (!progress.get(episode.channel.key)?.finished) return episode;
+  const episodes = catalog.byKey.get(episode.showKey)?.episodes ?? [];
+  return episodes[episodes.indexOf(episode) + 1] ?? episode;
+}
+
 /**
- * The episode last watched of each show, most recently watched show first.
+ * The episode to continue each show from, most recently watched show first.
  * `recents` holds channel keys, newest first.
  */
-export function resumePoints(catalog: SeriesCatalog, recents: readonly string[]): Map<string, Episode> {
+export function resumePoints(
+  catalog: SeriesCatalog,
+  recents: readonly string[],
+  progress: ProgressMap,
+): Map<string, Episode> {
   const out = new Map<string, Episode>();
   for (const key of recents) {
     const episode = catalog.episodes.get(key);
-    if (episode && !out.has(episode.showKey)) out.set(episode.showKey, episode);
+    if (episode && !out.has(episode.showKey)) out.set(episode.showKey, continueFrom(catalog, episode, progress));
   }
   return out;
+}
+
+/** The next episode of the same show, if there is one. */
+export function nextEpisode(catalog: SeriesCatalog, channel: Channel): Episode | undefined {
+  const episode = catalog.episodes.get(channel.key);
+  if (!episode) return undefined;
+  const episodes = catalog.byKey.get(episode.showKey)?.episodes ?? [];
+  return episodes[episodes.indexOf(episode) + 1];
 }
 
 /** Shows for resume points, in the same order. */
 export function resumeShows(catalog: SeriesCatalog, resume: ReadonlyMap<string, Episode>): Show[] {
   return [...resume.keys()].map((k) => catalog.byKey.get(k)).filter((s): s is Show => s !== undefined);
+}
+
+/** Share watched of the episode each show continues from, for the bar on its card. */
+export function showProgress(
+  resume: ReadonlyMap<string, Episode>,
+  progress: ProgressMap,
+): (show: Show) => number | undefined {
+  return (show) => {
+    const episode = resume.get(show.key);
+    return episode && progressFraction(progress.get(episode.channel.key));
+  };
 }
 
 /** Card label for shows in progress: the episode to pick up from, e.g. "S01 E03". */

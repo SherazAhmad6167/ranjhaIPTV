@@ -11,11 +11,14 @@ import { KIND_ICONS, KIND_LABELS, KINDS, matches, variantFor } from '@/lib/catal
 import { useLayout } from '@/lib/layout';
 import type { Channel, ChannelKind } from '@/lib/m3u';
 import { usePlaylist } from '@/lib/playlist-store';
-import { getSeries, showSummary, type Show } from '@/lib/series';
+import { progressFraction } from '@/lib/progress';
+import { useWatchProgress } from '@/lib/progress-store';
+import { getSeries, resumePoints, showProgress, showSummary, type Show } from '@/lib/series';
 import { colors, fonts } from '@/lib/theme';
 
 export default function SearchScreen() {
-  const { channels, favorites, toggleFavorite, setQueue } = usePlaylist();
+  const { channels, favorites, recents, toggleFavorite, setQueue } = usePlaylist();
+  const watched = useWatchProgress();
   const { s, gutter } = useLayout();
   const [query, setQuery] = useState('');
   const search = useDeferredValue(query.trim().toLowerCase());
@@ -52,6 +55,15 @@ export default function SearchScreen() {
       router.push({ pathname: '/player', params: { id: channel.id } });
     },
     [setQueue],
+  );
+
+  const channelProgress = useCallback(
+    (c: Channel) => (c.kind === 'live' ? undefined : progressFraction(watched.get(c.key))),
+    [watched],
+  );
+  const showsProgress = useMemo(
+    () => showProgress(resumePoints(getSeries(channels), recents, watched), watched),
+    [channels, recents, watched],
   );
 
   const openShow = useCallback((show: Show) => {
@@ -114,9 +126,9 @@ export default function SearchScreen() {
       )}
 
       {kind === 'series' ? (
-        <ChannelGrid {...shared} items={shows} badge={showSummary} onPress={openShow} />
+        <ChannelGrid {...shared} items={shows} badge={showSummary} progress={showsProgress} onPress={openShow} />
       ) : (
-        <ChannelGrid {...shared} items={list} onPress={play} />
+        <ChannelGrid {...shared} items={list} progress={channelProgress} onPress={play} />
       )}
     </View>
   );

@@ -24,6 +24,8 @@ interface Props<T extends CardItem> {
   favorites: ReadonlySet<string>;
   /** Label on each card, e.g. what's inside a series folder. */
   badge?(item: T): string | undefined;
+  /** Share watched of titles in progress. */
+  progress?(item: T): number | undefined;
   onPress(item: T, list: T[]): void;
   onToggleFavorite(key: string): void;
   onSeeAll?(): void;
@@ -42,6 +44,7 @@ function Rail<T extends CardItem>({
   titleSize,
   favorites,
   badge,
+  progress,
   onPress,
   onToggleFavorite,
   onSeeAll,
@@ -100,6 +103,7 @@ function Rail<T extends CardItem>({
               width={cardWidth}
               favorite={favorites.has(item.key)}
               badge={badge?.(item)}
+              progress={progress?.(item)}
               onPress={press}
               onLongPress={toggle}
             />

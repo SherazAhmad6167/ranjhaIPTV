@@ -1,28 +1,51 @@
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { useEvent, useEventListener } from 'expo';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams } from 'expo-router';
-import { useVideoPlayer, VideoView, type VideoContentFit, type VideoSource } from 'expo-video';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, FlatList, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  isPictureInPictureSupported,
+  useVideoPlayer,
+  VideoView,
+  type AudioTrack,
+  type SubtitleTrack,
+  type VideoContentFit,
+  type VideoPlayer,
+  type VideoSource,
+} from 'expo-video';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, AppState, FlatList, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, IconButton } from '@/components/Button';
 import { ChannelLogo } from '@/components/ChannelLogo';
-import { Focusable, NATIVE_DRIVER } from '@/components/Focusable';
+import { Focusable } from '@/components/Focusable';
 import { goBack } from '@/components/ScreenHeader';
+import { SidePanel } from '@/components/SidePanel';
+import { TrackPanel } from '@/components/TrackPanel';
 import { useLayout } from '@/lib/layout';
 import type { Channel } from '@/lib/m3u';
 import { usePlaylist } from '@/lib/playlist-store';
-import { favoriteKeyFor } from '@/lib/series';
+import { preferences, SUBTITLES_OFF, usePreferences } from '@/lib/preferences';
+import { isFinished, resumePosition } from '@/lib/progress';
+import { watchProgress } from '@/lib/progress-store';
+import { episodeCode, episodeTitle, favoriteKeyFor, getSeries, nextEpisode } from '@/lib/series';
 import { colors, fonts, gradients } from '@/lib/theme';
+import { languageCode, preferredTrack } from '@/lib/tracks';
 
 /** Retries per channel before showing an error (4 attempts in total: auto, HLS, auto, HLS). */
 const MAX_FAILURES = 3;
 const RETRY_DELAY_MS = 1000;
 const CONTROLS_TIMEOUT_MS = 4000;
+/** How long "Resumed from 47:12 · Start Over" stays up. */
+const RESUME_NOTICE_MS = 7000;
+/** Countdown before the next episode starts on its own. */
+const NEXT_EPISODE_S = 10;
+/** Time for the app to come back to the foreground after picture-in-picture ends. */
+const PIP_CLOSE_GRACE_MS = 700;
 const FITS: VideoContentFit[] = ['contain', 'cover', 'fill'];
 const FIT_LABELS: Record<VideoContentFit, string> = { contain: 'Fit', cover: 'Zoom', fill: 'Stretch' };
+
+type Panel = 'channels' | 'tracks';
 
 const isHlsUrl = (url: string) => /\.m3u8($|[?#])/i.test(url);
 
@@ -41,11 +64,56 @@ function toVideoSource(channel: Channel, failures: number): VideoSource {
   };
 }
 
+// The player is driven by assigning its properties. That happens out here because the
+// React Compiler treats whatever a hook returns as immutable inside a component.
+function seekTo(player: VideoPlayer, seconds: number) {
+  player.currentTime = seconds;
+}
+
+function setMuted(player: VideoPlayer, muted: boolean) {
+  player.muted = muted;
+}
+
+function selectAudio(player: VideoPlayer, track: AudioTrack) {
+  player.audioTrack = track;
+}
+
+function selectSubtitles(player: VideoPlayer, track: SubtitleTrack | null) {
+  player.subtitleTrack = track;
+}
+
+/** Switches to the viewer's usual audio language, when the stream has it. */
+function applyAudioPreference(player: VideoPlayer, tracks: AudioTrack[]) {
+  const pick = preferredTrack(tracks, player.audioTrack, preferences.get().audioLanguage);
+  if (pick) selectAudio(player, pick);
+}
+
+/** Turns subtitles on in the viewer's language, or off, as they last chose. */
+function applySubtitlePreference(player: VideoPlayer, tracks: SubtitleTrack[]) {
+  const wanted = preferences.get().subtitleLanguage;
+  if (wanted === SUBTITLES_OFF) {
+    if (player.subtitleTrack) selectSubtitles(player, null);
+    return;
+  }
+  const pick = preferredTrack(tracks, player.subtitleTrack, wanted);
+  if (pick) selectSubtitles(player, pick);
+}
+
+function canPictureInPicture(): boolean {
+  if (Platform.isTV) return false;
+  try {
+    return isPictureInPictureSupported();
+  } catch {
+    return false;
+  }
+}
+
 export default function PlayerScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { channels, getQueue, markWatched, favorites, toggleFavorite } = usePlaylist();
+  const { autoPictureInPicture } = usePreferences();
   const insets = useSafeAreaInsets();
-  const { s, width, wide } = useLayout();
+  const { s, width, wide, isTV } = useLayout();
 
   const [queue] = useState(() => {
     const q = getQueue();
@@ -63,9 +131,25 @@ export default function PlayerScreen() {
 
   const [fit, setFit] = useState<VideoContentFit>('contain');
   const [controlsVisible, setControlsVisible] = useState(true);
-  const [panelOpen, setPanelOpen] = useState(false);
+  const [panel, setPanel] = useState<Panel | null>(null);
   const [duration, setDuration] = useState(0);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  /** Last position reached in the current title; a reload after an error carries on from here. */
+  const position = useRef(0);
+  /** Where the current load should start; until it's applied, positions reported are stale. */
+  const pendingSeek = useRef<number | null>(null);
+  const loadedKey = useRef<string | null>(null);
+  const [resumedAt, setResumedAt] = useState<number | null>(null);
+  const resumeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [ended, setEnded] = useState(false);
+  /** Seconds until the next episode starts, while counting down. */
+  const [autoNextIn, setAutoNextIn] = useState<number | null>(null);
+
+  const videoRef = useRef<VideoView>(null);
+  const [pipSupported] = useState(canPictureInPicture);
+  const [inPip, setInPip] = useState(false);
+  const pipCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const player = useVideoPlayer(null, (p) => {
     p.timeUpdateEventInterval = 1;
@@ -81,6 +165,25 @@ export default function PlayerScreen() {
     currentLiveTimestamp: null,
     currentOffsetFromLive: null,
   });
+  // The player starts empty, so the track lists do too until a stream reports its own.
+  const { availableAudioTracks } = useEvent(player, 'availableAudioTracksChange', {
+    availableAudioTracks: [] as AudioTrack[],
+  });
+  const { audioTrack } = useEvent(player, 'audioTrackChange', { audioTrack: null as AudioTrack | null });
+  const { availableSubtitleTracks } = useEvent(player, 'availableSubtitleTracksChange', {
+    availableSubtitleTracks: [] as SubtitleTrack[],
+  });
+  const { subtitleTrack } = useEvent(player, 'subtitleTrackChange', {
+    subtitleTrack: null as SubtitleTrack | null,
+  });
+
+  // The episode after this one, when it's in the list being played through.
+  const upNext = useMemo(() => {
+    if (channel?.kind !== 'series') return undefined;
+    const episode = nextEpisode(getSeries(channels), channel);
+    const at = episode ? queue.findIndex((c) => c.key === episode.channel.key) : -1;
+    return episode && at >= 0 ? { episode, index: at } : undefined;
+  }, [channel, channels, queue]);
 
   // Auto-hide the controls while playing; keep them up while paused or failed.
   const showControls = useCallback(() => {
@@ -98,16 +201,61 @@ export default function PlayerScreen() {
     );
   }, []);
 
+  const showResumeNotice = useCallback((at: number) => {
+    setResumedAt(at);
+    clearTimeout(resumeTimer.current);
+    resumeTimer.current = setTimeout(() => setResumedAt(null), RESUME_NOTICE_MS);
+  }, []);
+
   useEventListener(player, 'playingChange', ({ isPlaying: playing }) => {
-    if (playing) showControls();
-    else {
+    if (playing) {
+      setEnded(false);
+      showControls();
+    } else {
       clearTimeout(hideTimer.current);
       setControlsVisible(true);
+      // Pausing is a natural place to stop: make sure the spot is saved and shown everywhere.
+      watchProgress.flush();
     }
   });
-  useEventListener(player, 'sourceLoad', ({ duration: d }) => setDuration(d));
+  useEventListener(player, 'sourceLoad', (e) => {
+    setDuration(e.duration);
+    applyAudioPreference(player, e.availableAudioTracks);
+    applySubtitlePreference(player, e.availableSubtitleTracks);
+  });
+  useEventListener(player, 'availableAudioTracksChange', (e) => applyAudioPreference(player, e.availableAudioTracks));
+  useEventListener(player, 'availableSubtitleTracksChange', (e) =>
+    applySubtitlePreference(player, e.availableSubtitleTracks),
+  );
   useEventListener(player, 'statusChange', ({ status: s }) => {
     if (s === 'error') scheduleRetry();
+    if (s === 'readyToPlay' && pendingSeek.current !== null) {
+      const target = pendingSeek.current;
+      pendingSeek.current = null;
+      // Some streams ignore a seek made before they're ready; make sure it took.
+      if (Math.abs(player.currentTime - target) > 5) seekTo(player, target);
+    }
+  });
+  useEventListener(player, 'timeUpdate', ({ currentTime }) => {
+    // Only real playback counts: not the zero reported while loading, nor a position from before a seek.
+    if (!channel || !isVod || !isPlaying || pendingSeek.current !== null) return;
+    position.current = currentTime;
+    watchProgress.record(channel.key, currentTime, duration);
+  });
+  useEventListener(player, 'playToEnd', () => {
+    if (!channel) return;
+    // A live stream that ends has dropped; reconnect.
+    if (!isVod) {
+      scheduleRetry();
+      return;
+    }
+    watchProgress.finish(channel.key, duration);
+    watchProgress.flush();
+    position.current = 0;
+    setEnded(true);
+    clearTimeout(hideTimer.current);
+    setControlsVisible(true);
+    if (upNext) setAutoNextIn(NEXT_EPISODE_S);
   });
 
   // (Re)load the stream whenever the channel changes or a retry is due. `replaceAsync`
@@ -115,11 +263,24 @@ export default function PlayerScreen() {
   useEffect(() => {
     if (!channel) return;
     let cancelled = false;
+    // A new title starts where the viewer left it; a reload of the same one (a retry)
+    // carries on from where it had got to.
+    const sameTitle = loadedKey.current === channel.key;
+    loadedKey.current = channel.key;
+    const startAt =
+      channel.kind === 'live' ? 0 : sameTitle ? position.current : resumePosition(watchProgress.get(channel.key));
+    position.current = startAt;
+    pendingSeek.current = startAt > 0 ? startAt : null;
+
     player
       .replaceAsync(toVideoSource(channel, failures))
       .then(() => {
         if (cancelled) return;
         setLoadFailed(false);
+        if (startAt > 0) {
+          seekTo(player, startAt);
+          if (!sameTitle) showResumeNotice(startAt);
+        }
         player.play();
       })
       .catch(() => {
@@ -131,29 +292,51 @@ export default function PlayerScreen() {
     return () => {
       cancelled = true;
     };
-  }, [player, channel, failures, reloadKey, scheduleRetry]);
+  }, [player, channel, failures, reloadKey, scheduleRetry, showResumeNotice]);
 
   useEffect(() => {
     if (channel) markWatched(channel.key);
   }, [channel, markWatched]);
 
+  // Leaving the app saves the spot straight away, in case it never comes back.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') watchProgress.flush();
+    });
+    return () => sub.remove();
+  }, []);
+
   useEffect(
     () => () => {
       clearTimeout(retryTimer.current);
       clearTimeout(hideTimer.current);
+      clearTimeout(resumeTimer.current);
+      clearTimeout(pipCloseTimer.current);
+      watchProgress.flush();
     },
     [],
   );
 
   const tune = useCallback(
     (next: number) => {
+      const target = ((next % queue.length) + queue.length) % queue.length;
+      if (target === index) {
+        showControls();
+        return;
+      }
+      watchProgress.flush();
       clearTimeout(retryTimer.current);
+      clearTimeout(resumeTimer.current);
       setFailures(0);
       setLoadFailed(false);
-      setIndex(((next % queue.length) + queue.length) % queue.length);
+      setEnded(false);
+      setAutoNextIn(null);
+      setResumedAt(null);
+      setDuration(0);
+      setIndex(target);
       showControls();
     },
-    [queue.length, showControls],
+    [queue.length, index, showControls],
   );
 
   const zap = useCallback(
@@ -163,6 +346,22 @@ export default function PlayerScreen() {
     [queue.length, index, tune],
   );
 
+  const playNext = useCallback(() => {
+    if (!upNext) return;
+    if (channel) watchProgress.finish(channel.key, duration);
+    tune(upNext.index);
+  }, [upNext, channel, duration, tune]);
+
+  // The next episode starts by itself once the countdown runs out.
+  useEffect(() => {
+    if (autoNextIn === null) return;
+    const timer = setTimeout(() => {
+      if (autoNextIn <= 1) playNext();
+      else setAutoNextIn(autoNextIn - 1);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [autoNextIn, playNext]);
+
   const retry = () => {
     clearTimeout(retryTimer.current);
     setFailures(0);
@@ -171,18 +370,38 @@ export default function PlayerScreen() {
   };
 
   const togglePlay = useCallback(() => {
-    if (player.playing) player.pause();
+    if (ended) {
+      setAutoNextIn(null);
+      player.replay();
+    } else if (player.playing) player.pause();
     else player.play();
     showControls();
-  }, [player, showControls]);
+  }, [player, ended, showControls]);
 
   const seekBy = useCallback(
     (seconds: number) => {
+      setEnded(false);
       player.seekBy(seconds);
       showControls();
     },
     [player, showControls],
   );
+
+  const seekToTime = (seconds: number) => {
+    setEnded(false);
+    setAutoNextIn(null);
+    seekTo(player, seconds);
+    position.current = seconds;
+    if (channel && isVod) watchProgress.record(channel.key, seconds, duration);
+    showControls();
+  };
+
+  const startOver = () => {
+    clearTimeout(resumeTimer.current);
+    setResumedAt(null);
+    seekToTime(0);
+    player.play();
+  };
 
   const cycleFit = () => {
     setFit((f) => FITS[(FITS.indexOf(f) + 1) % FITS.length]);
@@ -190,13 +409,42 @@ export default function PlayerScreen() {
   };
 
   const toggleMute = useCallback(() => {
-    player.muted = !player.muted;
+    setMuted(player, !player.muted);
     showControls();
   }, [player, showControls]);
 
+  const chooseAudio = (track: AudioTrack) => {
+    selectAudio(player, track);
+    // Remembered, so the next title plays in the same language when it can.
+    const code = languageCode(track.language);
+    if (code) preferences.set({ audioLanguage: code });
+  };
+
+  const chooseSubtitles = (track: SubtitleTrack | null) => {
+    selectSubtitles(player, track);
+    const code = track ? languageCode(track.language) : SUBTITLES_OFF;
+    if (code) preferences.set({ subtitleLanguage: code });
+  };
+
+  const enterPictureInPicture = () => {
+    setPanel(null);
+    videoRef.current?.startPictureInPicture().catch(() => {});
+  };
+
+  const onPictureInPictureStop = () => {
+    setInPip(false);
+    showControls();
+    clearTimeout(pipCloseTimer.current);
+    // Closing the floating window (rather than expanding it) leaves the app in the
+    // background. Stop there instead of playing on to nobody.
+    pipCloseTimer.current = setTimeout(() => {
+      if (AppState.currentState !== 'active') player.pause();
+    }, PIP_CLOSE_GRACE_MS);
+  };
+
   // Desktop browsers: keyboard shortcuts, like any desktop player.
-  const keys = useRef({ togglePlay, zap, seekBy, toggleMute, isVod, panelOpen, setPanelOpen, cycleFit });
-  keys.current = { togglePlay, zap, seekBy, toggleMute, isVod, panelOpen, setPanelOpen, cycleFit };
+  const keys = useRef({ togglePlay, zap, seekBy, toggleMute, isVod, panel, setPanel, cycleFit });
+  keys.current = { togglePlay, zap, seekBy, toggleMute, isVod, panel, setPanel, cycleFit };
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return;
     const onKey = (e: KeyboardEvent) => {
@@ -229,13 +477,13 @@ export default function PlayerScreen() {
           break;
         case 'c':
         case 'l':
-          k.setPanelOpen((o) => !o);
+          k.setPanel((p) => (p === 'channels' ? null : 'channels'));
           break;
         case 'z':
           k.cycleFit();
           break;
         case 'Escape':
-          if (k.panelOpen) k.setPanelOpen(false);
+          if (k.panel) k.setPanel(null);
           else if (!document.fullscreenElement) goBack();
           break;
         default:
@@ -258,21 +506,44 @@ export default function PlayerScreen() {
 
   const failed = status === 'error' || loadFailed;
   const gaveUp = failed && failures >= MAX_FAILURES;
-  const busy = !gaveUp && (status === 'loading' || status === 'idle' || failed);
+  const busy = !gaveUp && !ended && (status === 'loading' || status === 'idle' || failed);
   // For an episode this is its show, so "My List" collects the whole series.
   const favoriteKey = favoriteKeyFor(channel, channels);
   const favorite = favorites.has(favoriteKey);
   const next = queue.length > 1 ? queue[(index + 1) % queue.length] : undefined;
+  const listTitle = channel.kind === 'series' ? 'Episodes' : channel.kind === 'movie' ? 'Movies' : 'Channels';
+  const hasTracks = availableAudioTracks.length > 1 || availableSubtitleTracks.length > 0;
   const sidePad = { paddingLeft: s(16) + insets.left, paddingRight: s(16) + insets.right };
+  const overlays = !gaveUp && !inPip;
+  const showControlsNow = controlsVisible && overlays && !panel;
+  // Above the seek bar while the controls are up, near the bottom edge otherwise.
+  const floatBottom = insets.bottom + s(showControlsNow ? 92 : 24);
+  // Offered from the credits on; counts down once the episode is over.
+  const offerNext =
+    !!upNext && overlays && !panel && (autoNextIn !== null || (duration > 0 && isFinished(time.currentTime, duration)));
 
   return (
     <View style={styles.screen}>
-      <VideoView player={player} style={StyleSheet.absoluteFill} contentFit={fit} nativeControls={false} />
+      <VideoView
+        ref={videoRef}
+        player={player}
+        style={StyleSheet.absoluteFill}
+        contentFit={fit}
+        nativeControls={false}
+        allowsPictureInPicture={pipSupported}
+        startsPictureInPictureAutomatically={pipSupported && autoPictureInPicture && isPlaying}
+        onPictureInPictureStart={() => {
+          clearTimeout(pipCloseTimer.current);
+          setInPip(true);
+          setPanel(null);
+        }}
+        onPictureInPictureStop={onPictureInPictureStop}
+      />
 
       <Pressable
         style={StyleSheet.absoluteFill}
         onPress={() => {
-          if (panelOpen) setPanelOpen(false);
+          if (panel) setPanel(null);
           else if (controlsVisible && isPlaying) setControlsVisible(false);
           else showControls();
         }}
@@ -280,7 +551,7 @@ export default function PlayerScreen() {
         focusable={false}
       />
 
-      {busy && (
+      {busy && !inPip && (
         <View style={[StyleSheet.absoluteFill, styles.center]} pointerEvents="none">
           <View style={[styles.spinner, { width: s(84), height: s(84), borderRadius: s(42) }]}>
             <ActivityIndicator size="large" color="#fff" />
@@ -307,7 +578,21 @@ export default function PlayerScreen() {
         </View>
       )}
 
-      {controlsVisible && !gaveUp && !panelOpen && (
+      {inPip && (
+        // iOS keeps the app open behind an in-app floating window; Android hides it altogether.
+        <View style={[StyleSheet.absoluteFill, styles.center, styles.pipBackdrop]}>
+          <MaterialIcons name="picture-in-picture-alt" size={s(44)} color={colors.textMuted} />
+          <Text style={[styles.errorTitle, { fontSize: s(18) }]}>Playing in picture-in-picture</Text>
+          <Button
+            label="Bring It Back"
+            icon="expand"
+            variant="glass"
+            onPress={() => videoRef.current?.stopPictureInPicture().catch(() => {})}
+          />
+        </View>
+      )}
+
+      {showControlsNow && (
         <>
           <LinearGradient
             colors={gradients.scrimTop}
@@ -340,12 +625,28 @@ export default function PlayerScreen() {
               onPress={toggleMute}
               filled
             />
+            {hasTracks && (
+              <IconButton
+                icon="chatbox-ellipses-outline"
+                label="Audio and subtitles"
+                onPress={() => setPanel('tracks')}
+                filled
+              />
+            )}
             <IconButton icon="scan-outline" label={`Picture: ${FIT_LABELS[fit]}`} onPress={cycleFit} filled />
+            {pipSupported && (
+              <IconButton
+                icon={{ material: 'picture-in-picture-alt' }}
+                label="Picture in picture"
+                onPress={enterPictureInPicture}
+                filled
+              />
+            )}
             {Platform.OS === 'web' && (
               <IconButton icon="expand" label="Full screen" onPress={toggleFullscreen} filled />
             )}
             {queue.length > 1 && (
-              <IconButton icon="list" label="Channels" onPress={() => setPanelOpen(true)} filled />
+              <IconButton icon="list" label={listTitle} onPress={() => setPanel('channels')} filled />
             )}
           </LinearGradient>
 
@@ -366,16 +667,16 @@ export default function PlayerScreen() {
               onPress={togglePlay}
               zoom={1.08}
               accessibilityRole="button"
-              accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
+              accessibilityLabel={ended ? 'Play again' : isPlaying ? 'Pause' : 'Play'}
               hasTVPreferredFocus
               style={[styles.playButton, { width: s(84), height: s(84), borderRadius: s(42) }]}
               focusStyle={styles.playFocused}
             >
               <Ionicons
-                name={isPlaying ? 'pause' : 'play'}
+                name={ended ? 'reload' : isPlaying ? 'pause' : 'play'}
                 size={s(40)}
                 color="#fff"
-                style={!isPlaying && { marginLeft: s(4) }}
+                style={!isPlaying && !ended && { marginLeft: s(4) }}
               />
             </Focusable>
             {isVod ? (
@@ -398,11 +699,7 @@ export default function PlayerScreen() {
             pointerEvents="box-none"
           >
             {isVod && duration > 0 ? (
-              <SeekBar
-                current={time.currentTime}
-                duration={duration}
-                onSeek={(t) => seekBy(t - time.currentTime)}
-              />
+              <SeekBar current={ended ? duration : time.currentTime} duration={duration} onSeek={seekToTime} />
             ) : (
               <View style={[styles.liveRow, { gap: s(12) }]}>
                 {!isVod && <LiveBadge />}
@@ -436,15 +733,81 @@ export default function PlayerScreen() {
         </>
       )}
 
+      {resumedAt !== null && overlays && !panel && (
+        <View
+          style={[
+            styles.floating,
+            { left: s(16) + insets.left, bottom: floatBottom, gap: s(10), padding: s(6), paddingLeft: s(14), borderRadius: s(12) },
+          ]}
+        >
+          <Ionicons name="time-outline" size={s(18)} color={colors.textMuted} />
+          <Text style={[styles.floatingText, { fontSize: s(14) }]}>Resumed from {formatTime(resumedAt)}</Text>
+          <Focusable
+            onPress={startOver}
+            zoom={1.04}
+            accessibilityRole="button"
+            accessibilityLabel="Start over from the beginning"
+            style={[styles.floatingAction, { gap: s(6), paddingHorizontal: s(12), paddingVertical: s(7), borderRadius: s(8) }]}
+            focusStyle={styles.floatingActionFocused}
+          >
+            <Ionicons name="refresh" size={s(16)} color="#fff" />
+            <Text style={[styles.floatingActionText, { fontSize: s(13) }]}>Start Over</Text>
+          </Focusable>
+        </View>
+      )}
+
+      {offerNext && upNext && (
+        <View
+          style={[
+            styles.floating,
+            { right: s(16) + insets.right, bottom: floatBottom, gap: s(6), padding: s(6), borderRadius: s(12) },
+          ]}
+        >
+          <Focusable
+            onPress={playNext}
+            zoom={1.04}
+            accessibilityRole="button"
+            accessibilityLabel={`Play next episode, ${episodeTitle(upNext.episode)}`}
+            hasTVPreferredFocus={isTV && autoNextIn !== null}
+            style={[styles.nextButton, { gap: s(10), paddingVertical: s(8), paddingHorizontal: s(14), borderRadius: s(9) }]}
+            focusStyle={styles.playFocused}
+          >
+            <Ionicons name="play-skip-forward" size={s(18)} color="#0A0A0F" />
+            <View style={{ maxWidth: Math.min(s(240), width * 0.36) }}>
+              <Text style={[styles.nextLabel, { fontSize: s(11) }]}>
+                {autoNextIn !== null ? `NEXT EPISODE IN ${autoNextIn}` : 'NEXT EPISODE'}
+              </Text>
+              <Text style={[styles.nextTitle, { fontSize: s(14) }]} numberOfLines={1}>
+                {[episodeCode(upNext.episode), episodeTitle(upNext.episode)].filter(Boolean).join(' · ')}
+              </Text>
+            </View>
+          </Focusable>
+          {autoNextIn !== null && (
+            <IconButton icon="close" label="Don’t play the next episode" onPress={() => setAutoNextIn(null)} size={38} />
+          )}
+        </View>
+      )}
+
       <ChannelPanel
-        open={panelOpen}
+        open={panel === 'channels'}
+        title={listTitle}
         queue={queue}
         index={index}
         onSelect={(i) => {
           tune(i);
-          setPanelOpen(false);
+          setPanel(null);
         }}
-        onClose={() => setPanelOpen(false)}
+        onClose={() => setPanel(null)}
+      />
+      <TrackPanel
+        open={panel === 'tracks'}
+        audioTracks={availableAudioTracks}
+        audioTrack={audioTrack}
+        subtitleTracks={availableSubtitleTracks}
+        subtitleTrack={subtitleTrack}
+        onSelectAudio={chooseAudio}
+        onSelectSubtitles={chooseSubtitles}
+        onClose={() => setPanel(null)}
       />
     </View>
   );
@@ -470,56 +833,32 @@ const PANEL_ROW = 68;
 
 function ChannelPanel({
   open,
+  title,
   queue,
   index,
   onSelect,
   onClose,
 }: {
   open: boolean;
+  title: string;
   queue: Channel[];
   index: number;
   onSelect(i: number): void;
   onClose(): void;
 }) {
-  const { s, width, wide } = useLayout();
+  const { s, width, wide, isTV } = useLayout();
   const insets = useSafeAreaInsets();
   const panelWidth = Math.round(Math.min(s(400), width * (wide ? 0.42 : 0.85)));
-  const slide = useRef(new Animated.Value(0)).current;
-  const [mounted, setMounted] = useState(open);
   const rowHeight = s(PANEL_ROW);
 
-  if (open && !mounted) setMounted(true);
-
-  useEffect(() => {
-    Animated.timing(slide, {
-      toValue: open ? 1 : 0,
-      duration: 260,
-      useNativeDriver: NATIVE_DRIVER,
-    }).start(({ finished }) => {
-      if (finished && !open) setMounted(false);
-    });
-  }, [open, slide]);
-
-  if (!mounted) return null;
-
   return (
-    <Animated.View
-      style={[
-        styles.panel,
-        {
-          width: panelWidth + insets.right,
-          paddingRight: insets.right,
-          transform: [{ translateX: slide.interpolate({ inputRange: [0, 1], outputRange: [panelWidth + insets.right, 0] }) }],
-        },
-      ]}
+    <SidePanel
+      open={open}
+      width={panelWidth}
+      title={title}
+      subtitle={`${queue.length.toLocaleString()} in this list`}
+      onClose={onClose}
     >
-      <View style={[styles.panelHeader, { paddingTop: insets.top + s(16), paddingHorizontal: s(18), paddingBottom: s(12) }]}>
-        <View style={styles.flex}>
-          <Text style={[styles.panelTitle, { fontSize: s(20) }]}>Channels</Text>
-          <Text style={[styles.panelCount, { fontSize: s(13) }]}>{queue.length.toLocaleString()} in this list</Text>
-        </View>
-        <IconButton icon="close" label="Close channel list" onPress={onClose} size={40} />
-      </View>
       <FlatList
         data={queue}
         keyExtractor={(c) => c.id}
@@ -536,7 +875,7 @@ function ChannelPanel({
               accessibilityRole="button"
               accessibilityLabel={`Play ${item.name}`}
               accessibilityState={{ selected: active }}
-              hasTVPreferredFocus={active}
+              hasTVPreferredFocus={isTV && active}
               style={[styles.panelRow, { height: rowHeight, paddingHorizontal: s(18), gap: s(12) }, active && styles.panelRowActive]}
               focusStyle={styles.panelRowFocused}
             >
@@ -558,7 +897,7 @@ function ChannelPanel({
           );
         }}
       />
-    </Animated.View>
+    </SidePanel>
   );
 }
 
@@ -621,6 +960,7 @@ const styles = StyleSheet.create({
   errorTitle: { color: '#fff', fontFamily: fonts.bold, textAlign: 'center' },
   errorText: { color: '#C9CBD6', fontFamily: fonts.regular, textAlign: 'center', lineHeight: 22 },
   errorActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', marginTop: 12 },
+  pipBackdrop: { backgroundColor: colors.bg },
   topBar: {
     position: 'absolute',
     top: 0,
@@ -662,24 +1002,27 @@ const styles = StyleSheet.create({
   upNextFocused: { borderColor: '#fff', backgroundColor: 'rgba(40,40,52,0.9)' },
   upNextLabel: { color: colors.accent, fontFamily: fonts.bold, letterSpacing: 1 },
   upNextName: { color: '#fff', fontFamily: fonts.semibold },
+  floating: {
+    position: 'absolute',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(14,14,20,0.86)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  floatingText: { color: '#fff', fontFamily: fonts.medium, fontVariant: ['tabular-nums'] },
+  floatingAction: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.14)' },
+  floatingActionFocused: { backgroundColor: 'rgba(255,255,255,0.28)' },
+  floatingActionText: { color: '#fff', fontFamily: fonts.bold },
+  nextButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff' },
+  nextLabel: { color: colors.accent, fontFamily: fonts.extrabold, letterSpacing: 1 },
+  nextTitle: { color: '#0A0A0F', fontFamily: fonts.bold },
   seekRow: { flexDirection: 'row', alignItems: 'center', alignSelf: 'stretch' },
   time: { color: '#fff', fontFamily: fonts.medium, fontVariant: ['tabular-nums'], textAlign: 'center' },
   seekTrackHit: { flex: 1, justifyContent: 'center' },
   seekTrack: { borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.28)', overflow: 'hidden' },
   seekFill: { height: '100%', backgroundColor: colors.accent },
   seekThumb: { position: 'absolute', backgroundColor: colors.accent, borderWidth: 2, borderColor: '#fff' },
-  panel: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(10,10,15,0.94)',
-    borderLeftWidth: StyleSheet.hairlineWidth,
-    borderLeftColor: 'rgba(255,255,255,0.12)',
-  },
-  panelHeader: { flexDirection: 'row', alignItems: 'center' },
-  panelTitle: { color: colors.text, fontFamily: fonts.extrabold },
-  panelCount: { color: colors.textMuted, fontFamily: fonts.medium, marginTop: 2 },
   panelRow: { flexDirection: 'row', alignItems: 'center' },
   panelRowActive: { backgroundColor: 'rgba(255,36,71,0.12)' },
   panelRowFocused: { backgroundColor: 'rgba(255,255,255,0.1)' },

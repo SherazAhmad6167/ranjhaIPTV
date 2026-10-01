@@ -12,6 +12,7 @@ import { TopBar, useTopBarHeight, type Tab } from '@/components/TopBar';
 import {
   availableKinds,
   groupChannels,
+  type CardItem,
   KIND_ICONS,
   KIND_LABELS,
   pickFeatured,
@@ -21,7 +22,18 @@ import {
 import { useLayout } from '@/lib/layout';
 import type { Channel, ChannelKind } from '@/lib/m3u';
 import { usePlaylist } from '@/lib/playlist-store';
-import { getSeries, isShow, resumeBadge, resumePoints, resumeShows, showSummary, type Show } from '@/lib/series';
+import { progressFraction, type ProgressMap } from '@/lib/progress';
+import { useWatchProgress } from '@/lib/progress-store';
+import {
+  getSeries,
+  isShow,
+  resumeBadge,
+  resumePoints,
+  resumeShows,
+  showProgress,
+  showSummary,
+  type Show,
+} from '@/lib/series';
 import { colors, fonts } from '@/lib/theme';
 
 interface RailBase {
@@ -38,6 +50,8 @@ type Rail =
 interface HomeContent {
   rails: Rail[];
   featured: (Channel | Show)[];
+  /** Share watched of a title in progress, for the bar on its card. */
+  progressOf?(item: CardItem): number | undefined;
 }
 
 function channelHome(
@@ -45,10 +59,12 @@ function channelHome(
   kind: ChannelKind,
   recents: readonly string[],
   favorites: ReadonlySet<string>,
+  watched: ProgressMap,
 ): HomeContent {
   const ofKind = channels.filter((c) => c.kind === kind);
   const groups = groupChannels(ofKind);
-  const recentList = resolveKeys(ofKind, recents);
+  // A movie watched to the end has nothing left to continue.
+  const recentList = resolveKeys(ofKind, recents).filter((c) => kind === 'live' || !watched.get(c.key)?.finished);
   const favoriteList = ofKind.filter((c) => favorites.has(c.key));
   const rails: Rail[] = [];
   if (recentList.length) {
@@ -65,12 +81,21 @@ function channelHome(
   for (const g of groups) {
     rails.push({ key: `g:${g.name}`, title: g.name, channels: g.channels, seeAll: { group: g.name } });
   }
-  return { rails, featured: pickFeatured(recentList, groups.map((g) => g.channels)) };
+  return {
+    rails,
+    featured: pickFeatured(recentList, groups.map((g) => g.channels)),
+    progressOf: kind === 'live' ? undefined : (item) => progressFraction(watched.get(item.key)),
+  };
 }
 
-function seriesHome(channels: Channel[], recents: readonly string[], favorites: ReadonlySet<string>): HomeContent {
+function seriesHome(
+  channels: Channel[],
+  recents: readonly string[],
+  favorites: ReadonlySet<string>,
+  watched: ProgressMap,
+): HomeContent {
   const catalog = getSeries(channels);
-  const resume = resumePoints(catalog, recents);
+  const resume = resumePoints(catalog, recents, watched);
   const recentShows = resumeShows(catalog, resume);
   const favoriteShows = catalog.shows.filter((show) => favorites.has(show.key));
   const rails: Rail[] = [];
@@ -101,7 +126,12 @@ function seriesHome(channels: Channel[], recents: readonly string[], favorites: 
       badge: showSummary,
     });
   }
-  return { rails, featured: pickFeatured(recentShows, catalog.groups.map((g) => g.shows)) };
+  return {
+    rails,
+    featured: pickFeatured(recentShows, catalog.groups.map((g) => g.shows)),
+    // A show's bar follows the episode it continues from.
+    progressOf: showProgress(resume, watched),
+  };
 }
 
 export default function HomeScreen() {
@@ -117,6 +147,7 @@ export default function HomeScreen() {
     toggleFavorite,
     setQueue,
   } = usePlaylist();
+  const watched = useWatchProgress();
   const layout = useLayout();
   const { s, wide, gutter, gap } = layout;
   const insets = useSafeAreaInsets();
@@ -128,12 +159,12 @@ export default function HomeScreen() {
   const kind = kinds.includes(kindChoice) ? kindChoice : (kinds[0] ?? 'live');
   const variant = variantFor(kind);
 
-  const { rails, featured } = useMemo(
+  const { rails, featured, progressOf } = useMemo(
     () =>
       kind === 'series'
-        ? seriesHome(channels, recents, favorites)
-        : channelHome(channels, kind, recents, favorites),
-    [channels, kind, recents, favorites],
+        ? seriesHome(channels, recents, favorites, watched)
+        : channelHome(channels, kind, recents, favorites, watched),
+    [channels, kind, recents, favorites, watched],
   );
 
   const tabs = useMemo<Tab[]>(
@@ -216,6 +247,7 @@ export default function HomeScreen() {
             gutter,
             titleSize,
             favorites,
+            progress: progressOf,
             onToggleFavorite: toggleFavorite,
             onSeeAll: () => router.push({ pathname: '/browse', params: { kind, ...item.seeAll } }),
           };

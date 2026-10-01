@@ -40,7 +40,8 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "lint": "expo lint",
-    "test:parser": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-m3u.mts"
+    "test:parser": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-m3u.mts",
+    "test:playback": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-playback.mts"
   },
   "private": true
 }

@@ -7,6 +7,8 @@ const KEYS = {
   favorites: 'iptv.favorites',
   recents: 'iptv.recents',
   loadedAt: 'iptv.loadedAt',
+  progress: 'iptv.progress',
+  preferences: 'iptv.preferences',
 } as const;
 
 async function readJson<T>(key: string, fallback: T): Promise<T> {
@@ -34,6 +36,13 @@ export const storage = {
 
   getLoadedAt: () => readJson<number | null>(KEYS.loadedAt, null),
   setLoadedAt: (t: number) => writeJson(KEYS.loadedAt, t),
+
+  // Validated by their own modules: watch-progress.ts and preferences.ts.
+  getProgress: () => readJson<unknown>(KEYS.progress, null),
+  setProgress: (entries: unknown) => writeJson(KEYS.progress, entries),
+
+  getPreferences: () => readJson<unknown>(KEYS.preferences, null),
+  setPreferences: (prefs: unknown) => writeJson(KEYS.preferences, prefs),
 
   clearSession: () => AsyncStorage.multiRemove([KEYS.source, KEYS.loadedAt]),
 };

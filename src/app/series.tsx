@@ -10,13 +10,18 @@ import { Button } from '@/components/Button';
 import { initials } from '@/components/ChannelLogo';
 import { Chip } from '@/components/Chip';
 import { Focusable } from '@/components/Focusable';
+import { ProgressBar } from '@/components/ProgressBar';
 import { ScreenHeader } from '@/components/ScreenHeader';
 import { useLayout } from '@/lib/layout';
 import { usePlaylist } from '@/lib/playlist-store';
+import { progressFraction, timeLeftLabel, type WatchProgress } from '@/lib/progress';
+import { useWatchProgress } from '@/lib/progress-store';
 import {
+  continueFrom,
   episodeCode,
   episodeTitle,
   getSeries,
+  lastWatched,
   seasonLabel,
   type Episode,
   type Show,
@@ -27,26 +32,27 @@ import { colors, fonts, gradients, tileGradient } from '@/lib/theme';
 export default function SeriesScreen() {
   const params = useLocalSearchParams<{ show?: string }>();
   const { channels, loading, favorites, recents, toggleFavorite, setQueue } = usePlaylist();
+  const watched = useWatchProgress();
   const { s, wide, gutter, gap, width, height, bp } = useLayout();
   const insets = useSafeAreaInsets();
 
   const catalog = useMemo(() => getSeries(channels), [channels]);
   const show = catalog.byKey.get(params.show ?? '');
 
-  // The episode of this show watched last: where "Continue" picks up.
+  // Where the main button picks up: the episode watched last, or the next one once it's finished.
   const resume = useMemo(() => {
-    if (!show) return undefined;
-    for (const key of recents) {
-      const episode = catalog.episodes.get(key);
-      if (episode?.showKey === show.key) return episode;
-    }
-    return undefined;
-  }, [catalog, show, recents]);
+    const last = show && lastWatched(catalog, show, recents);
+    if (!last) return undefined;
+    const episode = continueFrom(catalog, last, watched);
+    const inProgress = progressFraction(watched.get(episode.channel.key)) !== undefined;
+    const tag: EpisodeTag = inProgress ? 'CONTINUE' : episode === last ? 'LAST WATCHED' : 'UP NEXT';
+    return { episode, tag };
+  }, [catalog, show, recents, watched]);
 
   const [seasonChoice, setSeasonChoice] = useState<number | null>(null);
   const season =
     show?.seasons.find((x) => x.number === seasonChoice) ??
-    show?.seasons.find((x) => x.number === resume?.season) ??
+    show?.seasons.find((x) => x.number === resume?.episode.season) ??
     show?.seasons[0];
 
   // The player's next/previous and episode list run through the whole show, across seasons.
@@ -81,7 +87,7 @@ export default function SeriesScreen() {
   const cols = bp === 'phone' || bp === 'tablet' ? 1 : bp === 'ultra' ? 3 : 2;
   const rowWidth = Math.floor((width - insets.left - insets.right - gutter * 2 - gap * (cols - 1)) / cols);
   const thumbWidth = Math.round(Math.min(rowWidth * 0.42, s(wide ? 220 : 150)));
-  const start = resume ?? show.episodes[0];
+  const start = resume?.episode ?? show.episodes[0];
 
   return (
     <View style={styles.screen}>
@@ -95,14 +101,15 @@ export default function SeriesScreen() {
         data={season.episodes}
         numColumns={cols}
         keyExtractor={(e) => e.channel.id}
-        extraData={resume}
+        extraData={watched}
         renderItem={({ item }) => (
           <EpisodeRow
             episode={item}
             fallbackLogo={show.logo}
             width={rowWidth}
             thumbWidth={thumbWidth}
-            current={item === resume}
+            tag={item === resume?.episode ? resume.tag : undefined}
+            progress={watched.get(item.channel.key)}
             onPress={play}
           />
         )}
@@ -118,7 +125,7 @@ export default function SeriesScreen() {
             <Details
               show={show}
               start={start}
-              resuming={!!resume}
+              progress={watched.get(start.channel.key)}
               favorite={favorites.has(show.key)}
               onPlay={play}
               onToggleFavorite={toggleFavorite}
@@ -183,7 +190,7 @@ function Backdrop({ show, height }: { show: Show; height: number }) {
 function Details({
   show,
   start,
-  resuming,
+  progress,
   favorite,
   onPlay,
   onToggleFavorite,
@@ -191,7 +198,8 @@ function Details({
   show: Show;
   /** The episode the main button plays. */
   start: Episode;
-  resuming: boolean;
+  /** How far into `start` the viewer got. */
+  progress?: WatchProgress;
   favorite: boolean;
   onPlay(episode: Episode): void;
   onToggleFavorite(key: string): void;
@@ -213,10 +221,11 @@ function Details({
     .join('  ·  ');
 
   const code = episodeCode(start);
+  const share = progressFraction(progress);
   const actions = (
     <View style={[wide ? styles.actionsRow : styles.actionsColumn, { gap: s(wide ? 12 : 10), marginTop: s(wide ? 24 : 18) }]}>
       <Button
-        label={`${resuming ? 'Continue' : 'Play'}${code ? ` ${code}` : ''}`}
+        label={`${share !== undefined ? 'Resume' : 'Play'}${code ? ` ${code}` : ''}`}
         icon="play"
         variant="light"
         size="lg"
@@ -274,6 +283,14 @@ function Details({
             {show.name}
           </Text>
           <Text style={[styles.meta, { fontSize: s(15), marginTop: s(8) }]}>{meta}</Text>
+          {progress && share !== undefined && (
+            <View style={[styles.resumeRow, { gap: s(10), marginTop: s(10) }]}>
+              <ProgressBar value={share} height={s(4)} style={{ width: s(wide ? 140 : 90) }} />
+              <Text style={[styles.resumeText, { fontSize: s(13) }]} numberOfLines={1}>
+                {timeLeftLabel(progress)}
+              </Text>
+            </View>
+          )}
           {wide && actions}
         </View>
       </View>
@@ -282,12 +299,15 @@ function Details({
   );
 }
 
+type EpisodeTag = 'CONTINUE' | 'UP NEXT' | 'LAST WATCHED';
+
 const EpisodeRow = memo(function EpisodeRow({
   episode,
   fallbackLogo,
   width,
   thumbWidth,
-  current,
+  tag,
+  progress,
   onPress,
 }: {
   episode: Episode;
@@ -295,8 +315,9 @@ const EpisodeRow = memo(function EpisodeRow({
   fallbackLogo?: string;
   width: number;
   thumbWidth: number;
-  /** The episode watched last. */
-  current: boolean;
+  /** Marks the episode the show continues from. */
+  tag?: EpisodeTag;
+  progress?: WatchProgress;
   onPress(episode: Episode): void;
 }) {
   const { s } = useLayout();
@@ -306,17 +327,20 @@ const EpisodeRow = memo(function EpisodeRow({
   const thumbHeight = Math.round((thumbWidth * 9) / 16);
   const code = episodeCode(episode);
   const title = episodeTitle(episode);
+  const share = progressFraction(progress);
+  const finished = progress?.finished === true;
+  const status = progress && share !== undefined ? timeLeftLabel(progress) : finished ? 'Watched' : undefined;
 
   return (
     <Focusable
       onPress={() => onPress(episode)}
       zoom={1.02}
       accessibilityRole="button"
-      accessibilityLabel={`Play ${code ? `${code}, ` : ''}${title}`}
+      accessibilityLabel={`${share !== undefined ? 'Resume' : 'Play'} ${code ? `${code}, ` : ''}${title}${status ? `, ${status}` : ''}`}
       style={[
         styles.row,
         { width, padding: s(8), gap: s(14), borderRadius: s(14) },
-        current && styles.rowCurrent,
+        tag && styles.rowCurrent,
       ]}
       focusStyle={styles.rowFocused}
     >
@@ -349,15 +373,32 @@ const EpisodeRow = memo(function EpisodeRow({
             >
               <Ionicons name="play" size={s(16)} color={focused ? '#0A0A0F' : '#fff'} style={{ marginLeft: s(2) }} />
             </View>
+            {finished && (
+              <View style={[styles.watchedBadge, { top: s(5), right: s(5), borderRadius: s(10) }]}>
+                <Ionicons name="checkmark-circle" size={s(18)} color={colors.success} />
+              </View>
+            )}
+            {share !== undefined && (
+              <ProgressBar
+                value={share}
+                height={s(4)}
+                style={[styles.thumbProgress, { left: s(6), right: s(6), bottom: s(6) }]}
+              />
+            )}
           </View>
           <View style={[styles.rowText, { gap: s(4) }]}>
             {code ? <Text style={[styles.code, { fontSize: s(12) }]}>{code}</Text> : null}
             <Text style={[styles.episodeTitle, { fontSize: s(16), lineHeight: s(21) }]} numberOfLines={2}>
               {title}
             </Text>
-            {current && (
+            {status && (
+              <Text style={[styles.status, { fontSize: s(12) }, finished && styles.statusWatched]} numberOfLines={1}>
+                {status}
+              </Text>
+            )}
+            {tag && (
               <View style={[styles.currentTag, { paddingHorizontal: s(7), paddingVertical: s(2), borderRadius: s(5) }]}>
-                <Text style={[styles.currentText, { fontSize: s(10) }]}>LAST WATCHED</Text>
+                <Text style={[styles.currentText, { fontSize: s(10) }]}>{tag}</Text>
               </View>
             )}
           </View>
@@ -395,6 +436,8 @@ const styles = StyleSheet.create({
     textShadowRadius: 18,
   },
   meta: { color: colors.textMuted, fontFamily: fonts.semibold },
+  resumeRow: { flexDirection: 'row', alignItems: 'center' },
+  resumeText: { color: colors.text, fontFamily: fonts.medium },
   actionsRow: { flexDirection: 'row', flexWrap: 'wrap' },
   actionsColumn: { flexDirection: 'column' },
   sectionTitle: { color: colors.text, fontFamily: fonts.bold, letterSpacing: 0.2 },
@@ -411,6 +454,8 @@ const styles = StyleSheet.create({
   },
   thumbNumber: { color: 'rgba(255,255,255,0.85)', fontFamily: fonts.black },
   thumbShade: { backgroundColor: 'rgba(0,0,0,0.18)' },
+  thumbProgress: { position: 'absolute' },
+  watchedBadge: { position: 'absolute', backgroundColor: 'rgba(0,0,0,0.55)' },
   playDisc: {
     position: 'absolute',
     alignItems: 'center',
@@ -423,6 +468,8 @@ const styles = StyleSheet.create({
   rowText: { flex: 1, minWidth: 0, alignItems: 'flex-start' },
   code: { color: colors.textMuted, fontFamily: fonts.bold, letterSpacing: 1 },
   episodeTitle: { color: colors.text, fontFamily: fonts.semibold },
+  status: { color: colors.textMuted, fontFamily: fonts.medium },
+  statusWatched: { color: colors.success },
   currentTag: { backgroundColor: colors.accent, marginTop: 2 },
   currentText: { color: '#fff', fontFamily: fonts.extrabold, letterSpacing: 1 },
   missing: { alignItems: 'center', paddingHorizontal: 32 },

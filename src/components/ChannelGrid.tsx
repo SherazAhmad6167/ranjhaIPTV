@@ -13,6 +13,8 @@ interface Props<T extends CardItem> {
   favorites: ReadonlySet<string>;
   /** Label on each card, e.g. what's inside a series folder. */
   badge?(item: T): string | undefined;
+  /** Share watched of titles in progress. */
+  progress?(item: T): number | undefined;
   onPress(item: T, list: T[]): void;
   onToggleFavorite(key: string): void;
   header?: ReactElement;
@@ -25,6 +27,7 @@ export function ChannelGrid<T extends CardItem>({
   variant,
   favorites,
   badge,
+  progress,
   onPress,
   onToggleFavorite,
   header,
@@ -53,6 +56,7 @@ export function ChannelGrid<T extends CardItem>({
           width={cardWidth}
           favorite={favorites.has(item.key)}
           badge={badge?.(item)}
+          progress={progress?.(item)}
           onPress={press}
           onLongPress={toggle}
         />

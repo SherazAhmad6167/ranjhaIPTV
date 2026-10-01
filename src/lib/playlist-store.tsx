@@ -12,6 +12,8 @@ import {
 import { downloadPlaylist } from './download';
 import { parseM3U, type Channel } from './m3u';
 import { clearCachedPlaylist, readCachedPlaylist, writeCachedPlaylist } from './playlist-cache';
+import { preferences } from './preferences';
+import { watchProgress } from './progress-store';
 import type { PlaylistSource } from './source';
 import { storage } from './storage';
 
@@ -83,6 +85,9 @@ export function PlaylistProvider({ children }: { children: ReactNode }) {
         storage.getFavorites(),
         storage.getRecents(),
         storage.getLoadedAt(),
+        // Ready before any screen shows, so the first title opened already resumes.
+        watchProgress.hydrate(),
+        preferences.hydrate(),
       ]);
       let cached: Channel[] = [];
       if (saved) {

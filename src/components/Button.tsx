@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import type { ComponentProps } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
@@ -9,6 +9,8 @@ import { colors, fonts, gradients } from '@/lib/theme';
 import { Focusable } from './Focusable';
 
 export type IconName = ComponentProps<typeof Ionicons>['name'];
+/** An Ionicons name, or `{ material }` for the few symbols only Material has, like picture-in-picture. */
+export type IconSpec = IconName | { material: ComponentProps<typeof MaterialIcons>['name'] };
 
 type Variant = 'brand' | 'light' | 'glass' | 'danger';
 
@@ -90,7 +92,7 @@ export function Button({
 }
 
 interface IconButtonProps {
-  icon: IconName;
+  icon: IconSpec;
   label: string;
   onPress(): void;
   /** Diameter in phone points; scaled for the screen. */
@@ -133,8 +135,10 @@ export function IconButton({
       {({ focused }) =>
         busy ? (
           <ActivityIndicator color={color} size="small" />
-        ) : (
+        ) : typeof icon === 'string' ? (
           <Ionicons name={icon} size={Math.round(d * 0.52)} color={focused ? '#0A0A0F' : color} />
+        ) : (
+          <MaterialIcons name={icon.material} size={Math.round(d * 0.52)} color={focused ? '#0A0A0F' : color} />
         )
       }
     </Focusable>

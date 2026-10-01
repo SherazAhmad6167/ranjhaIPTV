@@ -10,6 +10,7 @@ import { colors, fonts, gradients, tileGradient } from '@/lib/theme';
 
 import { initials } from './ChannelLogo';
 import { Focusable } from './Focusable';
+import { ProgressBar } from './ProgressBar';
 
 interface Props<T extends CardItem> {
   item: T;
@@ -18,6 +19,8 @@ interface Props<T extends CardItem> {
   favorite?: boolean;
   /** Short label on the artwork, e.g. "12 Episodes" on a series folder. */
   badge?: string;
+  /** Share watched (0 to 1) of a title in progress. */
+  progress?: number;
   onPress(item: T): void;
   onLongPress?(item: T): void;
 }
@@ -29,12 +32,16 @@ export function cardRadius(width: number) {
 /** Draws a channel, a movie or a series folder; generic so callbacks get back what was passed in. */
 export const ChannelCard = memo(Card) as typeof Card;
 
-function Card<T extends CardItem>({ item, variant, width, favorite, badge, onPress, onLongPress }: Props<T>) {
+function Card<T extends CardItem>({ item, variant, width, favorite, badge, progress, onPress, onLongPress }: Props<T>) {
   const height = Math.round(width * cardAspect(variant));
   const radius = cardRadius(width);
   const poster = variant === 'poster';
   const nameSize = Math.round(Math.min(26, Math.max(11, width * (poster ? 0.095 : 0.068))));
   const badgeSize = Math.round(Math.min(18, Math.max(10, width * 0.068)));
+  const pad = Math.round(width * 0.05);
+  const barHeight = Math.max(3, Math.round(width * 0.022));
+  const barInset = Math.round(radius * 0.7);
+  const label = badge ? `${item.name}, ${badge}` : `${progress !== undefined ? 'Resume' : 'Play'} ${item.name}`;
 
   return (
     <Focusable
@@ -43,7 +50,7 @@ function Card<T extends CardItem>({ item, variant, width, favorite, badge, onPre
       delayLongPress={400}
       zoom={1.07}
       accessibilityRole="button"
-      accessibilityLabel={badge ? `${item.name}, ${badge}` : `Play ${item.name}`}
+      accessibilityLabel={label}
       style={[styles.card, { width, height, borderRadius: radius }]}
       focusStyle={styles.cardFocused}
     >
@@ -56,7 +63,14 @@ function Card<T extends CardItem>({ item, variant, width, favorite, badge, onPre
             style={StyleSheet.absoluteFill}
             pointerEvents="none"
           />
-          <View style={[styles.caption, { padding: Math.round(width * 0.05) }]} pointerEvents="none">
+          <View
+            style={[
+              styles.caption,
+              // The progress bar sits along the bottom edge, below the name.
+              { padding: pad, paddingBottom: progress !== undefined ? barInset + barHeight + pad * 0.6 : pad },
+            ]}
+            pointerEvents="none"
+          >
             <Text
               style={[styles.name, { fontSize: nameSize, lineHeight: Math.round(nameSize * 1.2) }]}
               numberOfLines={poster ? 2 : 1}
@@ -85,6 +99,13 @@ function Card<T extends CardItem>({ item, variant, width, favorite, badge, onPre
               </Text>
             </View>
           ) : null}
+          {progress !== undefined && (
+            <ProgressBar
+              value={progress}
+              height={barHeight}
+              style={[styles.progress, { left: barInset, right: barInset, bottom: barInset }]}
+            />
+          )}
           {favorite && (
             <View style={[styles.badge, { top: radius * 0.6, right: radius * 0.6 }]} pointerEvents="none">
               <Ionicons name="star" size={Math.max(11, Math.round(width * 0.06))} color={colors.star} />
@@ -181,6 +202,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   caption: { position: 'absolute', left: 0, right: 0, bottom: 0 },
+  progress: { position: 'absolute' },
   name: {
     color: '#fff',
     fontFamily: fonts.semibold,

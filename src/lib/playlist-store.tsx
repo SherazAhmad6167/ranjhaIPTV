@@ -8,13 +8,14 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { AppState } from 'react-native';
 
-import { downloadPlaylist } from './download';
+import { downloadPlaylist, findServer } from './download';
 import { parseM3U, type Channel } from './m3u';
 import { clearCachedPlaylist, readCachedPlaylist, writeCachedPlaylist } from './playlist-cache';
 import { preferences } from './preferences';
 import { watchProgress } from './progress-store';
-import type { PlaylistSource } from './source';
+import { retarget, type PlaylistSource } from './source';
 import { storage } from './storage';
 
 /** Re-download the playlist in the background when the cached copy is older than this. */
@@ -61,13 +62,15 @@ export function PlaylistProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     setError(null);
     try {
-      const { text, playlist } = await downloadPlaylist(next);
+      const { text, playlist, server } = await downloadPlaylist(next);
       if (id !== requestId.current) return;
       const now = Date.now();
-      setSource(next);
-      setChannels(playlist.channels);
+      const answered = { ...next, server };
+      setSource(answered);
+      setChannels(retarget(playlist.channels, server));
       setLoadedAt(now);
-      if (save) await storage.setSource(next);
+      // A refresh that switched address saves it too, so the next launch points the cache there.
+      if (save || server !== next.server) await storage.setSource(answered);
       await Promise.all([writeCachedPlaylist(text), storage.setLoadedAt(now)]).catch(() => {});
     } catch (e) {
       if (id === requestId.current) setError((e as Error).message);
@@ -75,6 +78,18 @@ export function PlaylistProvider({ children }: { children: ReactNode }) {
     } finally {
       if (id === requestId.current) setLoading(false);
     }
+  }, []);
+
+  /** Points the channels at whichever server answers from this network now, without re-downloading. */
+  const recheckServer = useCallback(async (current: PlaylistSource) => {
+    const id = requestId.current;
+    const server = await findServer();
+    // A download or sign-out since then has the final say.
+    if (id !== requestId.current || server === current.server) return;
+    const moved = { ...current, server };
+    setSource(moved);
+    setChannels((prev) => retarget(prev, server));
+    await storage.setSource(moved);
   }, []);
 
   useEffect(() => {
@@ -92,7 +107,10 @@ export function PlaylistProvider({ children }: { children: ReactNode }) {
       let cached: Channel[] = [];
       if (saved) {
         const text = await readCachedPlaylist().catch(() => null);
-        if (text) cached = parseM3U(text).channels;
+        if (text) {
+          cached = parseM3U(text).channels;
+          if (saved.server) cached = retarget(cached, saved.server);
+        }
       }
       if (cancelled) return;
 
@@ -107,12 +125,23 @@ export function PlaylistProvider({ children }: { children: ReactNode }) {
       if (saved && (cached.length === 0 || stale)) {
         // Errors surface through `error`; the cached list stays usable meanwhile.
         load(saved, { save: false }).catch(() => {});
+      } else if (saved) {
+        recheckServer(saved).catch(() => {});
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [load]);
+  }, [load, recheckServer]);
+
+  // Phones move between networks while in the background, so check again on every return.
+  useEffect(() => {
+    if (!source) return;
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') recheckServer(source).catch(() => {});
+    });
+    return () => sub.remove();
+  }, [source, recheckServer]);
 
   // Persist favorites/recents after hydration so the initial empty state never overwrites saved data.
   useEffect(() => {
